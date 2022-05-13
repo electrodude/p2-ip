@@ -1,0 +1,697 @@
+'' EthPhy_RMII.spin2 Ethernet MAC/PHY driver for LAN8720A
+'' Reduced Media Independant Interface for IEEE802.3 Ethernet
+'' supports 100Mbps full duplex with auto-negotiation
+
+' Author: Nicolas Benezan (nicolas@benezan.de), forum: ManAtWork
+' special thanks to Simon Kaphahn (Simonius) for example code and support
+
+' bene 19-Feb-2022 first experimental version V0.1, RX working
+' bene 26-Feb-2022 V0.2 +TX implementation
+' bene 23-Mar-2022 V0.3 Waveshare Eval board -> Accessory board
+
+' TODO:
+' * RX_ER not monitored
+' * change pin numbering for acessory board
+' * add 24AA025E48 MAC, read from I2C
+
+{ When using the Waveshare LAN8720 ETH evaluation board the following
+  modifications need to be made:
+* remove R9 (RXER pullup) and connect RXER to pin header #13
+
+This puts the configuration straps in the following states:
+MODE[2..0] = %111 (internal pullups), sets 100Mbps full duplex, auto negotiation enabled
+PHYAD0 = 0 (internal pulldown),
+REGOFF = 0 (internal pulldown), core voltage regulator enabled
+INTSEL = 1 (external pullup), enable INT output (not used)
+The onboard 50MHz oscillator is connected to XTAL1, PHY is operated in REF_CLK input mode
+
+Pin assignments:
+base = any pin number divisible by 8
+TXD0   = base+0
+TXD1   = base+1
+TXEN   = base+2
+REFCLK = base+3 (from 50MHz oscillator)
+RXD0   = base+4
+RXD1   = base+5
+CRSDV  = base+6
+RXER   = base+7
+
+MDC  = any other pin number
+MDIO = MDC+1
+
+SMI serial management interface
+* MDC period>400ns, <2.5MHz, hi/lo > 160ns
+* data is sampled on the rising edge
+* setup / hold > 10ns
+
+read cycle:
+* preamble 32 1-bits P2 -> PHY
+* %0110 = start of frame, read OP-code
+* 5 bits PHY address
+* 5 bits register address
+* 2 bits turn around (floating, ignored)
+* 16 data bits from PHY -> P2
+
+write cycle:
+* preamble 32 1-bits P2 -> PHY
+* %0101 = start of frame, write OP-code
+* 5 bits PHY address
+* 5 bits register address
+* 2 bits turn around (floating, ignored)
+* 16 data bits P2 -> PHY
+
+}
+
+CON
+
+  _xtlfreq = 25_000_000
+  _clkfreq = 200_000_000
+  DEBUG_LOG_SIZE = 10_000
+
+  regControl  = 0  ' basic control
+  regStatus   = 1  ' basic status
+  regID1      = 2  ' Identifier 1
+  regID2      = 3  ' Identifier 2
+  regAutoAdv  = 4  ' auto-negotiation advertisment
+  regAutoAbi  = 5  ' auto-negotiation link partner ability
+  regAutoExp  = 6  ' auto-negotiation expansion
+  regModeCon  = 17 ' mode control/status
+  regSpecMode = 18 ' special modes
+  regErrCnt   = 26 ' symbol error counter
+  regIndic    = 27 ' control status indication
+  regIntSrc   = 29 ' interrupt source
+  regIntMask  = 30 ' interrupt mask
+  regSpecCon  = 31 ' special control/status
+
+  maxBufLong  = 1524/4 + 1
+  pinDebug    = 0
+
+  adrAT24DEV  = $A0 ' EEPROM device address
+  adrAT24MAC  = $FA ' EEPROM MAC address
+
+VAR
+  byte  cogRx
+  byte  cogTx
+  byte  pinScl
+  byte  pinSda
+
+OBJ
+  i2c: "jm_i2c.spin2"
+
+DAT
+  ALIGNL ' hub ram data shared between cogs
+
+' To send a packet write a pointer to the send buffer to txBufPtr. The length of the packet
+' (without CRC) has to be in the first long and data afterwards. The transmitter cog clears
+' txBufPtr when sending is completed. The buffer must not be modified while txBufPtr is non-zero.
+
+  txBufPtr    long      0       ' transmit command mailbox
+  linkStatus  long      0       ' bit2=1 if link is up, bit5=1 if auto-negotiation complete
+  debugData   long      0[16]
+
+  ownMac      byte      $00,$04,$a3,$9d,$d7,$dd
+  broadcast   byte      $FF[6]
+
+  txData      long      60 ' length
+              byte      $80,$EE,$73,$13,$B1,$B4,$00,$04,$a3,$9d,$d7,$dd,$15,$B3,$00,$2C ' dest MAC, src MAC, type, len
+              byte      $00,$00,$00,$00,$01,$01,$01,$01,$CC,$CC,$CC,$CC,$0F,$0F,$0F,$0F
+              byte      $00,$00,$00,$00,$01,$01,$01,$01,$CC,$CC,$CC,$CC,$0F,$0F,$0F,$0F
+              byte      $00,$00,$00,$00,$01,$01,$01,$01,$CC,$CC,$CC,$CC,$0F,$0F,$0F,$0F
+
+  example1    long      60 ' example packet for CRC calculation
+        byte $00, $B0, $52, $00, $00, $01, $1C, $ED, $6F, $26, $63, $93, $88, $E1, $00, $68
+        byte $A0, $00, $B0, $52, $68, $AF, $FC, $7F, $00, $00, $00, $00, $00, $00, $00, $00
+        byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+        byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $BF, $43, $9E, $52
+
+  example2    long      60 ' example for broadcast
+        byte $FF, $FF, $FF, $FF, $FF, $FF, $1C, $ED, $6F, $26, $63, $93, $88, $E1, $00, $00
+        byte $A0, $00, $B0, $52, $68, $AF, $FC, $7F, $00, $00, $00, $00, $00, $00, $00, $00
+        byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+        byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $A4, $F4, $B4, $F4
+
+' To avoid read/write conflicts to hub ram which would make locks neccessary we use two counters.
+' The receiver cog only writes to rxPutCnt and increments it whenever a packet is completely received.
+' Each packet with an even number is placed into rxBuffer0 and each odd number into rxBuffer1.
+' The API/caller cog is only allowed to read rxPutCnt. He increments rxGetCnt whenever he finished
+' processing the packet signalling that the buffer is free to be re-used.
+
+' So rxPutCnt==rxGetCnt means both buffers are empty
+' rxPutCnt==rxGetCnt+1 means one buffer is full
+' rxPutCnt==rxGetCnt+2 means both buffers are full
+' rxPutCnt is even/odd means newest packet received is in buffer1/0
+' rxGetCnt is even/odd means next packet to look for is in buffer0/1
+
+' Only valid packets with matching CRC are put into bufffers. All errors increment rxErrCnt.
+' The API/caller cog is only allowed to write to rxGetCnt. rxPutCnt and rxErrCnt are read only.
+' The packet length (bytes) is stored in the first longword, data afterwards.
+
+  rxPutCnt    long      0       ' receive buffer status mailbox
+  rxGetCnt    long      0
+  rxErrCnt    long      0       ' receiver error counter
+  rxBuffer0   long      0[maxBufLong]  ' len + 1522 bytes max
+  rxBuffer1   long      0[maxBufLong]
+
+PUB RxTxTest () | ptr, len
+' self test, display MAC, receive and send one packet
+  Start (8)
+  repeat 50
+    waitms (100)
+    'debug(uhex_long(linkStatus))
+    if linkStatus&%100
+      debug ("link is up")
+      quit
+  repeat while rxPutCnt==rxGetCnt
+  ptr:= @rxBuffer0
+  len:= long[ptr] <# 1500
+  debug(udec(len), uhex_byte_array(ptr+4, len))
+  bytemove (@txData+10, @ownMac, 6)
+  txBufPtr:= @txData
+  repeat while txBufPtr
+  debug(uhex_long_array(@debugData, 4))
+  repeat
+
+PUB RxDemo () | ptr, len
+  Start (8)
+  repeat
+    repeat while rxPutCnt==rxGetCnt
+    if rxGetCnt & 1
+      ptr:= @rxBuffer1
+    else
+      ptr:= @rxBuffer0
+    len:= long[ptr] <# 1500
+    ptr+= 4
+    debug(udec(len), uhex_byte_array(ptr, len))
+    rxGetCnt++
+
+PUB TxDemo ()
+  Start (8)
+  repeat 50
+    waitms (100)
+    debug(uhex_long(linkStatus))
+    if linkStatus&%100
+      debug ("link is up")
+      quit
+  txBufPtr:= @txData
+  repeat while txBufPtr
+  debug(uhex_long_array(@debugData, 4))
+  repeat
+
+PUB EthSend (ptr)
+  repeat while txBufPtr
+  txBufPtr:= ptr
+
+
+PUB Stop ()
+  if cogRx
+    cogstop (cogRx - 1)
+    cogRx:= 0
+  if cogTx
+    cogstop (cogTx - 1)
+    cogTx:= 0
+
+PRI ReadMacAdrFromEEPROM ()
+  pinl (pinTxEn) ' disable RMII
+  pinh (pinMdio) ' keep SMI quiet
+  i2c.setup (pinScl, pinSda, 400, i2c.PU_3K3)
+  i2c.start ()                          ' Select the device & send address
+  i2c.write (adrAT24DEV)
+  i2c.write (adrAT24MAC)                ' Only one address byte for 24AA02E48
+  i2c.start ()                          ' Reselect the device for reading
+  i2c.write (adrAT24DEV | 1)
+  i2c.rd_block (@ownMac, 6, i2c.NAK)
+  i2c.stop ()
+  pinf (pinTxEn)
+  pinf (pinMdio)
+  pinf (pinSda)
+  pinf (pinScl) ' release pins
+  debug(uhex_byte_array(@ownMac, 6))
+
+PUB Start (pinRmii) | i
+  pinMdc  := pinRmii
+  pinTxEn := pinRmii+1
+  pinTxd0 := pinRmii+2
+  pinTxd1 := pinRmii+3
+  pinTxClk:= pinRmii+4
+  pinRxClk:= pinRmii+4
+  pinCrsDv:= pinRmii+5
+  pinRxd0 := pinRmii+6
+  pinRxd1 := pinRmii+7
+  pinMdio := pinRmii+2 ' shared with TXD0
+  pinScl  := pinRmii   ' shared with MDC
+  pinSda  := pinRmii+3 ' shared with TXD1
+  ReadMacAdrFromEEPROM ()
+  smiClkDiv:= clkfreq / 4_000_000 ' 2MHz toggles at 4MHz
+  timeStdIpg:= clkfreq / 1_000_000 ' 100 bits = 1us
+  timeMinIpg:= clkfreq / (100_000_000 / 32) ' 32 bits = 320ns
+  timeStatPoll:= clkfreq / 10 ' 100ms
+  cogTx := coginit (16, @TxEntry, @txBufPtr) + 1
+  cogRx := coginit (16, @RxEntry, @rxPutCnt) + 1
+
+
+DAT     ' PASM transmitter COG, also responsible for SMI
+  ORG
+
+TxEntry
+              mov     pinTxdAll3,pinTxEn
+              or      pinTxdAll3,#2<<6
+              fltl    pinMdc                    ' reset smart pins
+              fltl    pinMdio
+              wrpin   modeMdc,pinMdc            ' transition mode / square wave
+              wxpin   smiClkDiv,pinMdc          ' base period
+              fltl    pinTxdAll3                ' reset smart pins
+              wrpin   modeTxEn,pinTxEn
+              wrpin   modeTxd0,pinTxd0
+              wrpin   modeTxd1,pinTxd1
+              wxpin   #15,pinTxdAll3            ' 16 bit continous mode
+              wypin   #0,pinTxdAll3             ' prime shift registers with 0s
+              mov     txd0,#%001<<6
+              or      txd0,pinTxd0
+              setse1  txd0                      ' Event: shift register buffer empty
+
+              mov     regAdr,#regControl
+              mov     x,##$3300                 ' 100Mb/s, auto-negotiation, full duplex
+              call    #WriteReg
+              getct   nextPoll
+              addct1  nextPoll,#2               ' first poll immediately
+
+' All three smart pins (TxEn, Txd0, Txd1) are used synchronously. They are held in reset
+' until packet transmission is started and the first word of the preamble is written
+' with WYPIN. The second WYPIN (after reset, DIR=1) is written without waiting, all
+' subsequent WYPINs need to wait for a buffer empty event. After the last data word (CRC)
+' the shift registers are cleared so that TxEn goes low and the smart pins are reset
+' (DIR=0).
+
+txMainLoop
+              jnct1   #txNoPoll                 ' check if status poll is necessary
+              addct1  nextPoll,timeStatPoll     ' increase CT value for next poll
+              mov     regAdr,#regStatus
+              call    #ReadReg
+              wrlong  x,ptra[1]                 ' write link status
+txNoPoll
+              rdlong  ptrb,ptra wz              ' wait for txBufPtr!=0
+        if_z  jmp     #txMainLoop
+              rdlong  txLen,ptrb                ' read length from first long
+              fge     txlen,#60                 ' limit min/max packet length
+              fle     txlen,##1518              ' 64..1522 including CRC
+              mov     txLongs,txLen             ' number of longs = bytes/4
+              shr     txLongs,#2
+              'wrlong  txLongs,ptra[5]
+              neg     txCrc,#1                  ' start value for CRC = -1
+
+' If the packet length is not divisible by 4 it would be too complicated to handle the
+' last incomplete longword at the end of the packet because at the same time we immediately
+' need to calculate and append the CRC which then required a lot of shifting and masking.
+' Instead, we do the alignment at the start of the packet so that any special cases at the
+' end are avoided and the CRC always starts on a longword boundary. Fortunatelly, the hub
+' ram FIFO interface supports non-aligned longword reads.
+
+' the following cases have to be considered:
+' * 0 bytes: alignment is skipped, preamble sent = $55555555, $D5555555
+'            1st longword fetched from txBufPtr+4 and sent by txDataLoop
+' * 1 byte : preamble sent = $55000000, $55555555, $aaD55555
+'            1st longword fetched from txBuffer+1: $aaiiiiii (i=invalid)
+' * 2 bytes: preamble sent = $55550000, $55555555, $bbaaD555
+'            1st longword fetched from txBuffer+2: $bbaaiiii
+' * 3 bytes: preamble sent = $55555500, $55555555, $ccbbaaD5
+'            1st longword fetched from txBuffer+3: $ccbbaaii
+
+              and     txLen,#3 wz               ' 0..3 bytes remaining
+              mov     txd0,#0
+        if_z  call    #txSendNoWait             ' prime shift registers (during reset)
+        if_nz rdlong  txd0,ptrb[1]              ' fetch first long (right justified for CRC)
+              add     ptrb,txLen                ' adr of first long (0..3 bytes left justified)
+        if_z  add     ptrb,#4
+              mov     x,#0
+              rdfast  #0,ptrb                   ' init FIFO, no wrapping
+        if_z  jmp     #skipAlign                ' no alignment required if 0 bytes
+
+              shl     txLen,#2                  ' *4 = number of bits pairs
+              bmask   enBits,txLen              ' mask of 13/9/5 bits
+              shr     enBits,#1                 ' -> 12/8/4 bits right justified
+              rev     enBits                    ' left justified
+              sar     enBits,#16                ' -> 28/24/20 bits left justified
+              shr     txLen,#1                  ' /2 = number of nibbles
+              rev     txd0
+              setq    txd0
+              rep     #1,txLen
+              crcnib  txCrc,txPoly              ' precalculate CRC for first 1..3 bytes
+              rflong  x                         ' prefetch incomplete long
+              mov     txd0,txPreamble           ' send 1st part of preamble (1..3 bytes)
+              'wrlong  enBits,ptra[2]
+              call    #txSendNoWait             ' directly to shift registers (during reset)
+skipAlign
+              dirh    pinTxdAll3                ' enable smart pins, first wy goes to buffer
+              neg     enBits,#1                 ' all bits = $FFFFFFFF
+              mov     txd0,txPreamble
+              'wrlong  txd0,ptra[3]
+              call    #txSendNoWait             ' send 2nd part of preamble (4 bytes)
+              shl     txLen,#2                  ' number of bits to shift
+              mov     txd0,txPreamble
+              bith    txd0,#31                  ' $55 -> $D5 for SFD
+              shr     txd0,txLen                ' remaining part of preamble+SFD, right justified
+              neg     txd1,#1
+              subr    txLen,#32
+              shl     txd1,txLen                ' mask for data, valid=1 left, invalid=0 right
+              and     x,txd1                    ' bytes 0..3 left justified, clear invalid bits
+              or      txd0,x                    ' merge with preamble+SFD
+              'wrlong  txd0,ptra[4]
+              call    #txSendLong               ' send last part of preamble+SFD + first data bytes
+
+txDataLoop
+              rflong  txd0
+              mov     txd1,txd0
+              rev     txd1
+              setq    txd1
+              rep     #1,#8                     ' calculate CRC, see comments at the end of DAT
+              crcnib  txCrc,txPoly              ' section of RX cog for detailed description
+              call    #txSendLong
+              djnz    txLongs,#txDataLoop
+
+              not     txd0,txCrc                ' append CRC after last data longword
+              wrlong  txd0,ptra[5]
+              call    #txSendLong
+              mov     enBits,#0                 ' clear smartpin buffers
+              mov     txd0,#0
+              call    #txSendLong               ' #0 is now in the buffers, data still in the sfift registers
+              waitse1                           ' all data shifted out, buffers empty, shift registers==0
+              dirl    pinTxdAll3                ' reset smart pins
+              wrlong  #0,ptra                   ' clear txBufPtr
+              waitx   timeStdIpg
+              jmp     #txMainLoop
+
+txSendLong
+              'drvh    #pinDebug
+              waitse1                           ' wait for buffer empty
+              'drvl    #pinDebug
+txSendNoWait
+              splitw  txd0                      ' even bits -> txd0 LSW
+              getword txd1,txd0,#1              ' odd bits -> txd1 LSW
+              wypin   txd0,pinTxd0
+              wypin   txd1,pinTxd1              ' feed smart pins
+        _ret_ wypin   enBits,pinTxEn
+
+
+testLoop      {
+  regControl  = 0  ' basic control
+  regStatus   = 1  ' basic status
+  regID1      = 2  ' Identifier 1
+  regID2      = 3  ' Identifier 2
+  regAutoAdv  = 4  ' auto-negotiation advertisment
+  regAutoAbi  = 5  ' auto-negotiation link partner ability
+              }
+              mov     regAdr,#regStatus
+              call    #ReadReg
+              wrlong  x,ptra[1]
+
+              waitx   ##20_000_000
+              jmp     #testLoop
+
+
+{ ******************** SMI serial management register interface ********************
+
+* MDC period>400ns, <2.5MHz, hi/lo > 160ns
+* data is sampled on the rising edge
+* setup / hold > 10ns
+* MDIO is shared with the TXD0 pin
+  TXEN has to be 0 during SMI communication
+  MDC has to be inactive during RMII activity
+
+read cycle:
+* preamble 32 1-bits P2 -> PHY
+* %0110 = start of frame, read OP-code
+* 5 bits PHY address
+* 5 bits register address
+* 2 bits turn around (floating, ignored)
+* 16 data bits from PHY -> P2
+}
+
+ReadReg ' address in regAdr, result in x
+              shl     regAdr,#18
+              setnib  regAdr,#%0110,#7
+              fltl    pinMdio                   ' reset smart pins
+              fltl    pinMdc
+              wrpin   modeMdout,pinMdio         ' synchronous serial transmit
+              wxpin   #31,pinMdio               ' 32 bits, continous mode
+              wypin   #$FF,pinMdio              ' preload shift register with 1s
+              neg     x,#1                      ' 1st word = all 1s
+              wypin   x,pinMdio                 ' preload shift register with preamble
+              drvh    pinMdio                   ' enable smart pins
+              drvl    pinMdc
+              wypin   #94,pinMdc                ' 32 clocks preamble + 15 op+adr bits
+              rev     regAdr                    ' MSB first
+              wypin   regAdr,pinMdio            ' load buffer with data word
+waitRd1       testp   pinMdc wc                 ' wait for end of transmission
+        if_nc jmp     #waitRd1
+
+              fltl    pinMdio                   ' reset smart pin
+              wrpin   modeMdin,pinMdio          ' turn around to input
+              wxpin   #16,pinMdio               ' 16 data bits + 1 dummy, no hold
+              drvl    pinMdio                   ' enable smart pin
+              wypin   #34,pinMdc                ' 17 clocks
+waitRd2       testp   pinMdio wc                ' wait for end of receiving
+        if_nc jmp     #waitRd2
+              rdpin   x,pinMdio
+              rev     x
+              zerox   x,#15
+endSMI
+              fltl    pinMdio                   ' reset smart pin
+              wrpin   modeTxd0,pinTxd0
+              wxpin   #15,pinTxdAll3            ' 16 bit continous mode
+        _ret_ wypin   #0,pinTxdAll3             ' prime shift registers with 0s
+
+{
+write cycle:
+* preamble 32 1-bits P2 -> PHY
+* %0101 = start of frame, write OP-code
+* 5 bits PHY address
+* 5 bits register address
+* 2 bits turn around (floating, ignored)
+* 16 data bits P2 -> PHY
+}
+
+WriteReg ' address in regAdr, data in x
+              shl     regAdr,#18
+              setnib  regAdr,#%0101,#7
+              setword regAdr,x,#0
+              fltl    pinMdio                   ' reset smart pins
+              fltl    pinMdc
+              wrpin   modeMdout,pinMdio         ' synchronous serial transmit
+              wxpin   #31,pinMdio               ' 32 bits, continous mode
+              wypin   #$FF,pinMdio              ' preload shift register with 1s
+              neg     x,#1                      ' 1st word = all 1s
+              wypin   x,pinMdio                 ' preload shift register with preamble
+              drvh    pinMdio                   ' enable smart pin
+              drvl    pinMdc
+              wypin   #128,pinMdc               ' 32 clocks preamble + 32 data bits
+              rev     regAdr                    ' MSB first
+              wypin   regAdr,pinMdio            ' load buffer with data word
+waitWr        testp   pinMdc wc                 ' wait for end of transmission
+        if_nc jmp     #waitWr
+              jmp     #endSMI
+
+pinTxEn       long      1
+pinTxd0       long      2
+pinTxd1       long      3
+pinTxClk      long      4
+pinMdc        long      0
+pinMdio       long      2
+
+smiClkDiv     long      100 ' 2Mhz base period = 100 sysclocks @ 200MHz
+timeStdIpg    long      200 ' 1us @ 200MHz standard inter-packet gap
+timeStatPoll  long      20_000_000 ' 100ms link status register polling interval
+modeMdc       long      P_TRANSITION + P_OE
+modeMdout     long      P_SYNC_TX + P_OE + P_MINUS2_B + P_INVERT_B
+modeMdin      long      P_SYNC_RX + P_MINUS2_B
+modeTxEn      long      P_SYNC_TX + P_SYNC_IO + P_OE + P_PLUS3_B
+modeTxd0      long      P_SYNC_TX + P_SYNC_IO + P_OE + P_PLUS2_B
+modeTxd1      long      P_SYNC_TX + P_SYNC_IO + P_OE + P_PLUS1_B
+txPoly        long      $EDB88320 ' CRC polynomial $04C11DB7 reversed
+txPreamble    long      $55555555
+enBits        long      0       ' bits for TxEn shift register
+
+regAdr        RES       1       ' register address
+x             RES       1
+pinTxdAll3    RES       1       ' pins TXD0/1 and TX_EN simultanously
+txCrc         RES       1
+txd0          RES       1
+txd1          RES       1
+txLen         RES       1
+txLongs       RES       1
+nextPoll      RES       1
+
+DAT     ' PASM receiver COG
+  ORG
+
+RxEntry
+              mov     pinRxdAll3,pinCrsDv
+              or      pinRxdAll3,#2<<6
+              fltl    pinRxdAll3
+              wrpin   modeRClk,pinRxClk
+              wrpin   modeRxd0,pinRxd0
+              wrpin   modeRxd1,pinRxd1
+              wrpin   modeCrsDv,pinCrsDv        ' switch CRS to smart mode
+              wxpin   #15,pinRxdAll3            ' 16 data bit pairs, no hold time
+              mov     rxd0,#%110<<6
+              or      rxd0,pinRxClk             ' RxClk is direct (non-smart) CrsDv input
+              setse1  rxd0                      ' Event: CRS is high
+              mov     rxd0,#%001<<6
+              or      rxd0,pinRxd0
+              setse2  rxd0                      ' Event: shift register buffer full
+
+rxMainLoop
+              rdlong  rxd0,ptra[1]
+              subr    rxd0,pktCnt
+              cmp     rxd0,#2 wc                ' both buffers full?
+        if_ae jmp     #rxMainLoop
+              mov     ptrb,ptra                 ' buffer address -> PTRB
+              add     ptrb,#12
+              add     ptrb,bufOffs
+              wrfast  #0,ptrb                   ' prepare FIFO, no wraparound
+              wflong  #0                        ' clear buffer, write len=0
+              neg     rxCrc,#1                  ' CRC start value = $FFFFFFFF
+              pollse2                           ' clear shift register buffer event
+              pollse1                           ' clear packet start event
+              waitse1                           ' wait for CRS to go hi (packet start)
+              dirh    pinRxdAll3                ' enable smart pin shift registers
+
+' CRS_DV goes high asynchronously when the J/K delimiter symbols are recognized (before the preamble)
+' The first received longword looks something like $55555500 or $55555400 (LSB = received first).
+' So this is a variable number of '0' bits followed by the preamble ($55 means RXD0=1 and RXD1=0).
+' First, we read a fixed number of 32 bits = 16 bit pairs.
+
+              waitse2                           ' wait for first 16 bit pairs
+              rdpin   rxd0,pinRxd0              ' MSW 16 bits, last received in bit 31
+              rev     rxd0                      ' -> LSW, first bit received in bit 15
+              getword rxd0,rxd0,#0              ' clear MSW
+              encod   rxd1,rxd0                 ' find position of first '1'
+              subr    rxd1,#30                  ' number of '0'bits = how many extra bits to shift
+              wxpin   rxd1,pinRxdAll3           ' length = 16 data bit pairs + extra bits
+
+' To synchronize the packet data we now need to shift more than 16 bit pairs in to get the full
+' preamble + SFD. The bits of the last 16 bit pairs remain in the lower bits of the shift registers.
+' The extra bits are at bit #15 down and push the leading '0' bits out at the right. The fresh
+' bits are in the MSW and are now the synchronized last 32 bits of the preamble + SFD = $D5_555555.
+
+              waitse2                           ' wait for rest of preamble received
+              rdpin   rxd0,pinRxd0
+              rdpin   rxd1,pinRxd1              ' shift registers -> MSWs
+              cmp     rxd0,sfdEven wcz          ' check if preamble+SFD matches $D5_555555
+              cmpx    rxd1,sfdOdd wz
+              wxpin   #15,pinRxdAll3            ' set length back to 16 data bit pairs, again
+        if_nz jmp     #rxAbort                  ' something is wrong
+              mov     lenCnt,#maxBufLong-1      ' count longs to avoid overflow
+
+' Data is received in 32 bit chunks = 16 bit pairs. On Ethernet, all data is sent bytewise strictly
+' from lower to higher address and with the lowest bit number first. If we read $44332211 from the
+' smart pin shift register it means that the $11 arrived first and it should also be placed into the
+' buffer at the lowest address. This is exactly what happens when a WRLONG or WFLONG is done. So
+' no big/little endian byte re-ordering is necessary, here.
+
+rxDataLoop
+              waitse2                           ' wait for real packet data
+              rdpin   rxd0,pinRxd0
+              rdpin   rxd1,pinRxd1              ' shift registers -> MSWs
+              rdpin   dvBits,pinCrsDv
+              shr     rxd0,#16
+              setword rxd1,rxd0,#0              ' combine rxd1:rxd0
+              mergew  rxd1                      ' shuffle bits
+              'movbyts rxd1,#%00_01_10_11        ' reverse bytewise NOT NECESSARY!
+              wflong  rxd1                      ' write to buffer
+              rev     rxd1                      ' crcnib needs MSB first
+              tjnf    dvBits,#lastBytes         ' CRS_DV not high all the time?
+              setq    rxd1
+              rep     #1,#8
+              crcnib  rxCrc,rxPoly              ' see comment below about rxPoly bit order
+              djnz    lenCnt,#rxDataLoop
+              jmp     #rxAbort                  ' if we ever arrive here we have run out of buffer
+                                                ' space (packet longer than 1522 bytes)
+
+lastBytes                                       ' end of packet, <4 bytes left
+              subr    lenCnt,#maxBufLong-1
+              shl     lenCnt,#2                 ' byte length = longs*4
+              encod   rxd0,dvBits
+              sub     rxd0,#14
+              shr     rxd0,#2                   ' how many extra bytes? 0..3
+              add     lenCnt,rxd0
+              shl     rxd0,#1 wz                ' how many nibbles? 0..6
+        if_nz setq    rxd1                      ' get back bit reversed data
+        if_nz rep     #1,rxd0                   ' if_nz avoids endless loop
+        if_nz crcnib  rxCrc,rxPoly              ' see comment below about rxPoly bit order
+              cmp     rxCrc,finalCrc wz         ' check for final value
+        if_nz jmp     #rxAbort
+              add     pktCnt,#1                 ' success!
+              wrlong  lenCnt,ptrb               ' write length to buffer[0]
+              wrlong  pktCnt,ptra               ' increment rxPutCnt
+              xor     bufOffs,##maxBufLong*4    ' alternate buffer
+{
+              wrlong  rxCrc,ptrb                ' write debug values -> buffer
+              wrlong  pktCnt,ptrb[1]
+              wrlong  dvBits,ptrb[2]
+              wrlong  lenCnt,ptrb[3]
+}
+rxDone
+              dirl    pinRxdAll3                ' reset smart pins
+waitIpg       getct   rxd0
+              add     rxd0,timeMinIpg
+              setq    rxd0
+              waitse1 wc                        ' wait min inter-packet gap, C=timeout
+        if_nc jmp     #waitIpg                  ' repeat if CRS=1 detected (not idle)
+              jmp     #rxMainLoop
+
+rxAbort       {
+              wrlong  sfdEven,ptrb
+              wrlong  sfdOdd,ptrb[1]
+              wrlong  rxd0,ptrb[2]
+              wrlong  rxd1,ptrb[3]
+              }
+              add     errCnt,#1
+              wrlong  errCnt,ptra[2]
+              jmp     #rxDone
+
+' It is important that there is no ringing on the clock input and that the high and low times
+' are well above one sysclock period. So it is recommended that a series termination resistor is
+' inserted at the REF_CLK output of the LAN8720. However, this makes the edges slower. We setup
+' the CLK pin as Schmitt trigger input.
+modeRClk      long      P_SCHMITT_A + P_SYNC_IO + P_PLUS1_A
+' Caution: the Schmitt trigger gate comes before the +/-3 multiplexer, so P_SCHMITT_A selects
+' Schmitt trigger for the CLK input that is routed to the shift registers but P_PLUS_A re-routes
+' the signal CRS_DV to show up at the IN signal of pinRxClk. This is a trick to have both the
+' smart pin and the direct input available at the same time. (Thanks Simonius!)
+
+' P_SYNC_IO is important to avoid metastability and synchronization problems. The flipflop
+' in the RClk path ensures that all smart pins see the same clock and none of them accidentally
+' start one clock earlier or later due to slightly different routing delays. The flipflops in
+' the data paths avoid unnecessary hold time requirements.
+pinRxClk      long      4
+modeCrsDv     long      P_SYNC_RX + P_SYNC_IO + P_MINUS1_B
+modeRxd0      long      P_SYNC_RX + P_SYNC_IO + P_MINUS2_B
+modeRxd1      long      P_SYNC_RX + P_SYNC_IO + P_MINUS3_B
+pinCrsDv      long      5
+pinRxd0       long      6
+pinRxd1       long      7
+'pinRxEr       long      7  ' not used
+
+rxPoly        long      $EDB88320 ' CRC polynomial $04C11DB7 reversed
+finalCrc      long      $DEBB20E3 ' $2144DF1C inverted, final CRC value to check for
+' CRC calculation is somehow confusing. In the P2 the CRC shift register itself is shifting
+' right (see CRCBIT instruction: D=D>>1). But the Q register shifts left (see CRCNIB instruction).
+' As the SYNC_RX smart pins also shift to the right (LSB = send/received first) Q has to be loaded
+' with the reversed bit order. The polynomial has also to be reversed because the standard
+' notation of $04c11db7 is meant for left shifting.
+
+allFF                             ' alias for -1
+sfdEven       long      $FFFFFFFF ' preamble+SFD even bits
+sfdOdd        long      $80000000 ' preamble+SFD odd bits (merged together = $D5555555)
+timeMinIpg    long      64        ' 32 bits * 10ns = 64 clocks @200MHz
+pktCnt        long      0
+errCnt        long      0
+bufOffs       long      0       ' offset for double buffering
+
+'pinRxdBoth    RES       1       ' Rxd0+Rxd1 simultanously
+pinRxdAll3    RES       1       ' Rxd0/1 and CrsDv simultanously
+rxd0          RES       1
+rxd1          RES       1
+dvBits        RES       1       ' CRS_DV sampled with shift register
+lenCnt        RES       1
+rxCrc         RES       1
