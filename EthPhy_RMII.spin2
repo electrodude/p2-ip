@@ -4,6 +4,7 @@
 
 ' Author: Nicolas Benezan (nicolas@benezan.de), forum: ManAtWork
 ' special thanks to Simon Kaphahn (Simonius) for example code and support
+' Modified by Albert Emanuel Milani (Electrodude)
 ' Copyright: MIT License, see end of file
 
 ' bene 19-Feb-2022 first experimental version V0.1, RX working
@@ -110,27 +111,6 @@ DAT
   linkStatus  long      0       ' bit2=1 if link is up, bit5=1 if auto-negotiation complete
   debugData   long      0[16]
 
-  ownMac      byte      $00,$04,$a3,$9d,$d7,$dd
-  broadcast   byte      $FF[6]
-
-  txData      long      60 ' length
-              byte      $80,$EE,$73,$13,$B1,$B4,$00,$04,$a3,$9d,$d7,$dd,$15,$B3,$00,$2C ' dest MAC, src MAC, type, len
-              byte      $00,$00,$00,$00,$01,$01,$01,$01,$CC,$CC,$CC,$CC,$0F,$0F,$0F,$0F
-              byte      $00,$00,$00,$00,$01,$01,$01,$01,$CC,$CC,$CC,$CC,$0F,$0F,$0F,$0F
-              byte      $00,$00,$00,$00,$01,$01,$01,$01,$CC,$CC,$CC,$CC,$0F,$0F,$0F,$0F
-
-  example1    long      60 ' example packet for CRC calculation
-        byte $00, $B0, $52, $00, $00, $01, $1C, $ED, $6F, $26, $63, $93, $88, $E1, $00, $68
-        byte $A0, $00, $B0, $52, $68, $AF, $FC, $7F, $00, $00, $00, $00, $00, $00, $00, $00
-        byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
-        byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $BF, $43, $9E, $52
-
-  example2    long      60 ' example for broadcast
-        byte $FF, $FF, $FF, $FF, $FF, $FF, $1C, $ED, $6F, $26, $63, $93, $88, $E1, $00, $00
-        byte $A0, $00, $B0, $52, $68, $AF, $FC, $7F, $00, $00, $00, $00, $00, $00, $00, $00
-        byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
-        byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $A4, $F4, $B4, $F4
-
 ' To avoid read/write conflicts to hub ram which would make locks neccessary we use two counters.
 ' The receiver cog only writes to rxPutCnt and increments it whenever a packet is completely received.
 ' Each packet with an even number is placed into rxBuffer0 and each odd number into rxBuffer1.
@@ -153,56 +133,6 @@ DAT
   rxBuffer0   long      0[maxBufLong]  ' len + 1522 bytes max
   rxBuffer1   long      0[maxBufLong]
 
-PUB RxTxTest () | ptr, len
-' self test, display MAC, receive and send one packet
-  Start (8)
-  repeat 50
-    waitms (100)
-    'debug(uhex_long(linkStatus))
-    if linkStatus&%100
-      debug ("link is up")
-      quit
-  repeat while rxPutCnt==rxGetCnt
-  ptr:= @rxBuffer0
-  len:= long[ptr] <# 1500
-  debug(udec(len), uhex_byte_array(ptr+4, len))
-  bytemove (@txData+10, @ownMac, 6)
-  txBufPtr:= @txData
-  repeat while txBufPtr
-  debug(uhex_long_array(@debugData, 4))
-  repeat
-
-PUB RxDemo () | ptr, len
-  Start (8)
-  repeat
-    repeat while rxPutCnt==rxGetCnt
-    if rxGetCnt & 1
-      ptr:= @rxBuffer1
-    else
-      ptr:= @rxBuffer0
-    len:= long[ptr] <# 1500
-    ptr+= 4
-    debug(udec(len), uhex_byte_array(ptr, len))
-    rxGetCnt++
-
-PUB TxDemo ()
-  Start (8)
-  repeat 50
-    waitms (100)
-    debug(uhex_long(linkStatus))
-    if linkStatus&%100
-      debug ("link is up")
-      quit
-  txBufPtr:= @txData
-  repeat while txBufPtr
-  debug(uhex_long_array(@debugData, 4))
-  repeat
-
-PUB EthSend (ptr)
-  repeat while txBufPtr
-  txBufPtr:= ptr
-
-
 PUB Stop ()
   if cogRx
     cogstop (cogRx - 1)
@@ -211,7 +141,7 @@ PUB Stop ()
     cogstop (cogTx - 1)
     cogTx:= 0
 
-PRI ReadMacAdrFromEEPROM ()
+PRI ReadMacAdrFromEEPROM (ownMac_out)
   pinl (pinTxEn) ' disable RMII
   pinh (pinMdio) ' keep SMI quiet
   i2c.setup (pinScl, pinSda, 400, i2c.PU_3K3)
@@ -220,15 +150,14 @@ PRI ReadMacAdrFromEEPROM ()
   i2c.write (adrAT24MAC)                ' Only one address byte for 24AA02E48
   i2c.start ()                          ' Reselect the device for reading
   i2c.write (adrAT24DEV | 1)
-  i2c.rd_block (@ownMac, 6, i2c.NAK)
+  i2c.rd_block (ownMac_out, 6, i2c.NAK)
   i2c.stop ()
   pinf (pinTxEn)
   pinf (pinMdio)
   pinf (pinSda)
   pinf (pinScl) ' release pins
-  debug(uhex_byte_array(@ownMac, 6))
 
-PUB Start (pinRmii) | i
+PUB Start (pinRmii, ownMac_out) | i
   pinMdc  := pinRmii
   pinTxEn := pinRmii+1
   pinTxd0 := pinRmii+2
@@ -241,13 +170,35 @@ PUB Start (pinRmii) | i
   pinMdio := pinRmii+2 ' shared with TXD0
   pinScl  := pinRmii   ' shared with MDC
   pinSda  := pinRmii+3 ' shared with TXD1
-  ReadMacAdrFromEEPROM ()
+  ReadMacAdrFromEEPROM (ownMac_out)
   smiClkDiv:= clkfreq / 4_000_000 ' 2MHz toggles at 4MHz
   timeStdIpg:= clkfreq / 1_000_000 ' 100 bits = 1us
   timeMinIpg:= clkfreq / (100_000_000 / 32) ' 32 bits = 320ns
   timeStatPoll:= clkfreq / 10 ' 100ms
   cogTx := coginit (16, @TxEntry, @txBufPtr) + 1
   cogRx := coginit (16, @RxEntry, @rxPutCnt) + 1
+
+PUB EthSend (ptr)
+  repeat while txBufPtr
+  txBufPtr:= ptr
+
+PUB EthRecvPoll : ptr
+  if rxPutCnt == rxGetCnt
+    return 0
+
+  if rxGetCnt & 1
+    ptr := @rxBuffer1
+  else
+    ptr := @rxBuffer0
+
+PUB EthRecvAck (ptr)
+  if ptr <> EthRecvPoll
+    debug("BUG: inappropriate call to EthRecvAck! ", udec(rxPutCnt, rxGetCnt))
+
+  rxGetCnt++
+
+PUB EthLinkStatus : status
+  status := linkStatus
 
 
 DAT     ' PASM transmitter COG, also responsible for SMI
