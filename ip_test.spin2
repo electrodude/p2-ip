@@ -4,45 +4,64 @@ Copyright © 2022 Albert Emanuel Milani
 See end of file for terms of use (MIT).
 }}
 
-CON
+CON '' Configuration
 
   _xtlfreq = 20_000_000
   _clkfreq = 200_000_000
 
+  PHY_BASE = 8
+
 OBJ
 
   phy : "EthPhy_RMII.spin2"
+  ip  : "ip.spin2"
 
-DAT
+DAT '' Static config
 
-mac        byte      0[6]
+mac             byte    0[6]
+ipv4            byte    169,254,34,56
 
-PUB main | ptr, len, link_status_prev, link_status
 
-  phy.start(8, @mac)
+VAR
+
+  long link_status_prev, link_status
+
+CON '' Demo code
+PUB main
+
+  phy.start(PHY_BASE, @mac)
   debug("MAC: ", uhex_byte_array_(@mac, 6))
+  ip.init()
+  ip.set_mac(0, @mac)
+  ip.set_ipv4(0, @ipv4)
 
   link_status~
   repeat
-    ' Wait for a packet
-    repeat
-      link_status_prev, link_status := link_status, phy.EthLinkStatus
-      if link_status <> link_status_prev
-        ' Link status changed
-        debug(uhex(link_status))
-        if (link_status ^ link_status_prev) & %100
-          if link_status & %100
-            debug("link up")
-          else
-            ip.link_reset
-            debug("link down")
-    until ptr := phy.EthRecvPoll
+    link_status_prev, link_status := link_status, phy.EthLinkStatus
+    if link_status <> link_status_prev
+      ' Link status changed
+      debug(uhex(link_status))
+      if (link_status ^ link_status_prev) & %100
+        if link_status & %100
+          debug("link up")
+        else
+          ip.link_reset
+          debug("link down")
 
-    ' Handle packet
-    \handle_pkt(ptr)
+    poll_rx_pkt
 
-    ' Release RX buffer
-    phy.EthRecvAck(ptr)
+PRI poll_rx_pkt | ptr, len
+
+  ' Poll for a packet
+  ptr := phy.EthRecvPoll
+  ifnot ptr
+    return
+
+  ' Handle packet
+  \handle_pkt(ptr)
+
+  ' Release RX buffer
+  phy.EthRecvAck(ptr)
 
 PRI handle_pkt(ptr) | len
   len := long[ptr]
@@ -50,10 +69,10 @@ PRI handle_pkt(ptr) | len
   if len > 1500
     abort
 
-  debug("rx ", udec(len), uhex_byte_array(ptr+4, len))
+  'debug("rx ", udec(len), uhex_byte_array(ptr+4, len))
 
-  '' TODO: Handle packet and update len
-  abort
+  ifnot len := \ip.on_rx_eth(ptr+4, len)
+    abort
 
   long[ptr] := len
 

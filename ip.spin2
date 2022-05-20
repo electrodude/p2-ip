@@ -1,0 +1,61 @@
+{{
+Propeller 2 Internet Protocol implementation
+Copyright © 2022 Albert Emanuel Milani
+See end of file for terms of use (MIT).
+}}
+
+CON '' Initialization
+PUB init
+
+  link_reset
+
+CON '' Ethernet framing
+PUB on_rx_eth(ptr, rx_len) : tx_len
+
+  debug("rx eth ", udec(rx_len), uhex_byte_array(ptr, rx_len), ": NYI")
+  abort 0
+
+CON '' ARP - RFC 826
+CON '' IPv4 - RFC 791
+CON '' IPv6 - RFC 8200
+CON '' ICMPv4 - RFC 1624
+CON '' TCP - RFC 793
+CON '' UDP - RFC 768
+CON '' DHCP - RFC TODO
+CON '' mDNS - RFC TODO
+CON '' DNS - RFC TODO
+CON '' Hosts table
+PUB link_reset
+
+  '' TODO
+
+PUB set_mac(i, ptr)
+  '' TODO
+
+PUB set_ipv4(i, ptr)
+  '' TODO
+
+CON '' Copyright
+{{
+
+  Terms of Use: MIT License
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+}}
