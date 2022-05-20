@@ -10,10 +10,67 @@ PUB init
   link_reset
 
 CON '' Ethernet framing
-PUB on_rx_eth(ptr, rx_len) : tx_len
+'' Assumes the caller deals with the CRC and doesn't include it in lengths.
+PUB on_rx_eth(ptr, rx_len) : tx_len | ethertype, cb
 
-  debug("rx eth ", udec(rx_len), uhex_byte_array(ptr, rx_len), ": NYI")
-  abort 0
+  if rx_len < 14
+    debug("rx eth ", uhex_word(rx_len), " < 14; too short")
+    abort 0
+
+  if rx_len => 1524
+    debug("rx eth ", uhex_word(rx_len), " too long")
+    abort 0
+
+  '' TODO: Only accept packets to our MAC, broadcast, or relevant multicast addresses (e.g. mDNS)
+
+  ethertype := bswap2(word[ptr][6])
+
+  'debug("rx eth ", udec(rx_len), uhex_byte_array(ptr, rx_len))
+
+  ' Find correct callback according to EtherType
+  case ethertype
+    '' TODO
+    other:
+      debug("rx eth ", uhex_word(rx_len), ": unknown ", uhex_word(ethertype))
+      abort 0
+
+  ' Dispatch payload
+  tx_len := cb(ptr, ptr + 14, rx_len - 14):2
+
+  ' Add Ethernet header to tx_len
+  tx_len += 14
+
+  finalize_tx_eth(ptr, tx_len)
+
+PUB setup_tx_eth(ptr, ethertype) : payload_ptr
+
+  word[ptr][6] := bswap2(ethertype)
+
+  payload_ptr := ptr + 14
+
+PUB finalize_tx_eth(ptr, tx_len) | ethertype, cb
+
+  ' Fill dst address with old src
+  bytemove(ptr, ptr + 6, 6)
+
+  ' Fill src address with our own
+  bytemove(ptr + 6, @ownMAC, 6)
+
+  ethertype := bswap2(word[ptr][6])
+
+  ' Find correct callback according to EtherType
+  case ethertype
+    other:
+      debug("tx eth ", uhex_word(tx_len), ": unknown ", uhex_word(ethertype))
+      abort 0
+
+  ' Call function according to EtherType
+  cb(ptr + 14, tx_len - 14):0
+
+  ' Pad frame to at least 60 bytes (not counting 4 byte CRC)
+  if tx_len < 60
+    bytefill(@byte[ptr][tx_len], 0, 60 - tx_len)
+    tx_len := 60
 
 CON '' ARP - RFC 826
 CON '' IPv4 - RFC 791
@@ -25,15 +82,32 @@ CON '' DHCP - RFC TODO
 CON '' mDNS - RFC TODO
 CON '' DNS - RFC TODO
 CON '' Hosts table
+DAT
+
+              alignl
+
+' host 0: self
+ownIPv4       byte 0, 0, 0, 0
+ownMAC        byte $00, $00, $00, $00, $00, $00
+
 PUB link_reset
 
   '' TODO
 
 PUB set_mac(i, ptr)
-  '' TODO
+  ifnot i
+    bytemove(@ownMAC, ptr, 6)
 
 PUB set_ipv4(i, ptr)
-  '' TODO
+  ifnot i
+    bytemove(@ownIPv4, ptr, 4)
+
+CON '' Utility functions
+PUB bswap2(w) : result
+  return w.byte[0] << 8 | w.byte[1]
+
+PUB bswap4(l) : result
+  return l.byte[0] << 24 | l.byte[1] << 16 | l.byte[2] << 8 | l.byte[3]
 
 CON '' Copyright
 {{

@@ -4,11 +4,14 @@ Tested with ManAtWork's included MAC/PHY driver for the LAN8720A.  It should be 
 
 ## Current Functionality
 
-- Echos Ethernet frames received from ManAtWork's driver
+- Parses Ethernet frames, but doesn't do anything with them yet
 
 ## Planned Work
 
-- Ethernet frames
+- Use fewer than three cogs
+	- E.g. one for both TX and RX and another (possibly using LUT sharing, possibly using XBYTE) for most of IP
+- Refactor into more Spin objects
+- Send packets on our own, not just in response to received packets
 - ARP
 - IPv4
 - IPv6
