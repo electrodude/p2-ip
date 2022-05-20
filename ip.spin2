@@ -79,15 +79,68 @@ PUB finalize_tx_eth(ptr, tx_len) | ethertype, cb
 
 CON '' ARP - RFC 826
   ETHERTYPE_ARP = $0806
-PUB on_rx_arp(eth_hdr, ptr, rx_len) : tx_len
+  ARP_REQUEST = 1
+  ARP_REPLY   = 2
+PUB on_rx_arp(eth_hdr, ptr, rx_len) : tx_len | opcode
 
-  debug("rx ARP ", uhex_word(rx_len), ": NYI")
+  if rx_len < 28
+    debug("rx ARP ", uhex_word(rx_len), " < ", uhex_(28), "; too short")
+    abort 0
+  if rx_len > 28
+    '' TODO: Duh - 60 byte min frame size
+    debug("rx ARP ", uhex_word(rx_len), " > ", uhex_(28), "; extra bytes")
+
+  ifnot word[ptr] == bswap2($0001) {
+  } and word[ptr][1] == bswap2(ETHERTYPE_IPv4) {
+  } and byte[ptr][4] == 6 {
+  } and byte[ptr][5] == 4
+    debug("rx ARP ", uhex_word(rx_len), ": unsupported protocol")
+    abort 0
+
+  case opcode := bswap2(word[ptr][3])
+    ARP_REQUEST:
+      ' send reply
+      word[ptr][3] := bswap2(2)
+      '' Reply to sender
+      tx_len := 28
+      ifnot long[ptr+24] <> ownIPv4.long or word[ptr+18] or long[ptr+20]
+        debug("rx ARP request for me: Who has ", udec_byte_array_(ptr+24, 4), "? Tell ", udec_byte_array_(ptr+14, 4), " at ", uhex_byte_array_(ptr+8, 6))
+        word[ptr][3] := bswap2(ARP_REPLY)
+        ' Copy sender data to target
+        bytemove(ptr+18, ptr+8, 10)
+        debug("tx ARP reply: ", udec_byte_array_(@ownIPv4, 4), " is at ", uhex_byte_array_(@ownMAC, 6), " - tell ", udec_byte_array_(ptr+24, 4), " at ", uhex_byte_array_(ptr+18, 6))
+        return
+    ARP_REPLY:
+      debug("rx ARP reply: ", udec_byte_array_(ptr+14, 4), " is at ", uhex_byte_array_(ptr+8, 6), " - tell ", udec_byte_array_(ptr+24, 4), " at ", uhex_byte_array_(ptr+18, 6))
+    other:
+      debug("rx ARP ", uhex_word(rx_len), ": bad ", uhex_word(opcode))
+
+  ' No response by default
   abort 0
+
+PUB setup_tx_arp(ptr, opcode) : payload_ptr | arp_hdr
+
+  arp_hdr := setup_tx_eth(ptr, ETHERTYPE_ARP)
+
+  word[ptr] := bswap2($0001)
+  word[ptr][1] := bswap2(ETHERTYPE_IPv4)
+  byte[ptr][4] := 6
+  byte[ptr][5] := 4
+  word[arp_hdr][3] := bswap2(opcode)
+
+  payload_ptr := arp_hdr
 
 PRI finalize_tx_arp(ptr, tx_len)
 
-  debug("tx ARP ", uhex_word(tx_len), ": NYI")
-  abort 0
+  if tx_len < 28
+    debug("tx ARP ", uhex_word(tx_len), " < ", uhex_(28), "; too short")
+    abort 0
+  if tx_len > 28
+    debug("tx ARP ", uhex_word(tx_len), " > ", uhex_(28), "; extra bytes")
+
+  ' Fill source MAC and IPv4 address with our own
+  bytemove(ptr+8, @ownMAC, 6)
+  bytemove(ptr+14, @ownIPv4, 4)
 
 CON '' IPv4 - RFC 791
   ETHERTYPE_IPv4 = $0800

@@ -4,7 +4,8 @@ Tested with ManAtWork's included MAC/PHY driver for the LAN8720A.  It should be 
 
 ## Current Functionality
 
-- Parses Ethernet frames and dispatches them by EtherType to dummy handlers
+- Parses Ethernet frames and dispatches them by EtherType
+- Replies to ARP requests
 
 ## Planned Work
 
@@ -13,6 +14,8 @@ Tested with ManAtWork's included MAC/PHY driver for the LAN8720A.  It should be 
 - Refactor into more Spin objects
 - Send packets on our own, not just in response to received packets
 - ARP
+	- Properly probe for an address before claiming it
+	- Send ARP probes for nodes we're trying to contact
 - IPv4
 - IPv6
 - ICMPv4
