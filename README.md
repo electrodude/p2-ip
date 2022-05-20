@@ -4,7 +4,7 @@ Tested with ManAtWork's included MAC/PHY driver for the LAN8720A.  It should be 
 
 ## Current Functionality
 
-- Parses Ethernet frames, but doesn't do anything with them yet
+- Parses Ethernet frames and dispatches them by EtherType to dummy handlers
 
 ## Planned Work
 
