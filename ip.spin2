@@ -29,7 +29,9 @@ PUB on_rx_eth(ptr, rx_len) : tx_len | ethertype, cb
 
   ' Find correct callback according to EtherType
   case ethertype
-    '' TODO
+    ETHERTYPE_IPv4: cb := @on_rx_ipv4
+    ETHERTYPE_ARP : cb := @on_rx_arp
+    ETHERTYPE_IPv6: cb := @on_rx_ipv6
     other:
       debug("rx eth ", uhex_word(rx_len), ": unknown ", uhex_word(ethertype))
       abort 0
@@ -60,6 +62,9 @@ PUB finalize_tx_eth(ptr, tx_len) | ethertype, cb
 
   ' Find correct callback according to EtherType
   case ethertype
+    ETHERTYPE_IPv4: cb := @finalize_tx_ipv4
+    ETHERTYPE_ARP : cb := @finalize_tx_arp
+    ETHERTYPE_IPv6: cb := @finalize_tx_ipv6
     other:
       debug("tx eth ", uhex_word(tx_len), ": unknown ", uhex_word(ethertype))
       abort 0
@@ -73,8 +78,41 @@ PUB finalize_tx_eth(ptr, tx_len) | ethertype, cb
     tx_len := 60
 
 CON '' ARP - RFC 826
+  ETHERTYPE_ARP = $0806
+PUB on_rx_arp(eth_hdr, ptr, rx_len) : tx_len
+
+  debug("rx ARP ", uhex_word(rx_len), ": NYI")
+  abort 0
+
+PRI finalize_tx_arp(ptr, tx_len)
+
+  debug("tx ARP ", uhex_word(tx_len), ": NYI")
+  abort 0
+
 CON '' IPv4 - RFC 791
+  ETHERTYPE_IPv4 = $0800
+PUB on_rx_ipv4(eth_hdr, ptr, rx_len) : tx_len
+
+  debug("rx IPv4 ", uhex_word(rx_len), ": NYI")
+  abort 0
+
+PRI finalize_tx_ipv4(ptr, tx_len)
+
+  debug("tx IPv4 ", uhex_word(tx_len), ": NYI")
+  abort 0
+
 CON '' IPv6 - RFC 8200
+  ETHERTYPE_IPv6 = $86DD
+PUB on_rx_ipv6(eth_hdr, ptr, rx_len) : tx_len
+
+  debug("rx IPv6 ", uhex_word(rx_len), ": NYI")
+  abort 0
+
+PRI finalize_tx_ipv6(ptr, tx_len)
+
+  debug("tx IPv6 ", uhex_word(tx_len), ": NYI")
+  abort 0
+
 CON '' ICMPv4 - RFC 1624
 CON '' TCP - RFC 793
 CON '' UDP - RFC 768
