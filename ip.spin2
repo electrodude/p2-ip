@@ -11,7 +11,7 @@ PUB init
 
 CON '' Ethernet framing
 '' Assumes the caller deals with the CRC and doesn't include it in lengths.
-PUB on_rx_eth(ptr, rx_len) : tx_len | ethertype, cb
+PUB on_rx_eth(ptr, rx_len) : tx_len, dst | ethertype, cb
 
   if rx_len < 14
     debug("rx eth ", uhex_word(rx_len), " < 14; too short")
@@ -37,12 +37,12 @@ PUB on_rx_eth(ptr, rx_len) : tx_len | ethertype, cb
       abort 0
 
   ' Dispatch payload
-  tx_len := cb(ptr, ptr + 14, rx_len - 14):2
+  tx_len, dst := cb(ptr, ptr + 14, rx_len - 14):2
 
   ' Add Ethernet header to tx_len
   tx_len += 14
 
-  finalize_tx_eth(ptr, tx_len)
+  finalize_tx_eth(ptr, tx_len, dst)
 
 PUB setup_tx_eth(ptr, ethertype) : payload_ptr
 
@@ -50,10 +50,19 @@ PUB setup_tx_eth(ptr, ethertype) : payload_ptr
 
   payload_ptr := ptr + 14
 
-PUB finalize_tx_eth(ptr, tx_len) | ethertype, cb
+PUB finalize_tx_eth(ptr, tx_len, dst) | ethertype, cb
 
-  ' Fill dst address with old src
-  bytemove(ptr, ptr + 6, 6)
+  if dst => 0
+    ' Get dst address from hosts table
+    debug("NYI: dst MAC from hosts table")
+    abort 0
+  elseif dst == DST_REPLY
+    ' Fill dst address with old src
+    bytemove(ptr, ptr + 6, 6)
+  elseif dst == DST_BROADCAST
+    bytefill(ptr, $FF, 6)
+  elseifnot dst == DST_MANUAL
+    abort 0
 
   ' Fill src address with our own
   bytemove(ptr + 6, @ownMAC, 6)
@@ -70,7 +79,7 @@ PUB finalize_tx_eth(ptr, tx_len) | ethertype, cb
       abort 0
 
   ' Call function according to EtherType
-  cb(ptr + 14, tx_len - 14):0
+  cb(ptr + 14, tx_len - 14, dst):0
 
   ' Pad frame to at least 60 bytes (not counting 4 byte CRC)
   if tx_len < 60
@@ -81,7 +90,7 @@ CON '' ARP - RFC 826
   ETHERTYPE_ARP = $0806
   ARP_REQUEST = 1
   ARP_REPLY   = 2
-PUB on_rx_arp(eth_hdr, ptr, rx_len) : tx_len | opcode
+PUB on_rx_arp(eth_hdr, ptr, rx_len) : tx_len, dst | opcode
 
   if rx_len < 28
     debug("rx ARP ", uhex_word(rx_len), " < ", uhex_(28), "; too short")
@@ -102,7 +111,7 @@ PUB on_rx_arp(eth_hdr, ptr, rx_len) : tx_len | opcode
       ' send reply
       word[ptr][3] := bswap2(2)
       '' Reply to sender
-      tx_len := 28
+      tx_len, dst := 28, DST_REPLY
       ifnot long[ptr+24] <> ownIPv4.long or word[ptr+18] or long[ptr+20]
         debug("rx ARP request for me: Who has ", udec_byte_array_(ptr+24, 4), "? Tell ", udec_byte_array_(ptr+14, 4), " at ", uhex_byte_array_(ptr+8, 6))
         word[ptr][3] := bswap2(ARP_REPLY)
@@ -130,7 +139,7 @@ PUB setup_tx_arp(ptr, opcode) : payload_ptr | arp_hdr
 
   payload_ptr := arp_hdr
 
-PRI finalize_tx_arp(ptr, tx_len)
+PRI finalize_tx_arp(ptr, tx_len, dst)
 
   if tx_len < 28
     debug("tx ARP ", uhex_word(tx_len), " < ", uhex_(28), "; too short")
@@ -144,7 +153,7 @@ PRI finalize_tx_arp(ptr, tx_len)
 
 CON '' IPv4 - RFC 791
   ETHERTYPE_IPv4 = $0800
-PUB on_rx_ipv4(eth_hdr, ptr, rx_len) : tx_len
+PUB on_rx_ipv4(eth_hdr, ptr, rx_len) : tx_len, dst
 
   debug("rx IPv4 ", uhex_word(rx_len), ": NYI")
   abort 0
@@ -156,7 +165,7 @@ PRI finalize_tx_ipv4(ptr, tx_len)
 
 CON '' IPv6 - RFC 8200
   ETHERTYPE_IPv6 = $86DD
-PUB on_rx_ipv6(eth_hdr, ptr, rx_len) : tx_len
+PUB on_rx_ipv6(eth_hdr, ptr, rx_len) : tx_len, dst
 
   debug("rx IPv6 ", uhex_word(rx_len), ": NYI")
   abort 0
@@ -173,8 +182,13 @@ CON '' DHCP - RFC TODO
 CON '' mDNS - RFC TODO
 CON '' DNS - RFC TODO
 CON '' Hosts table
-DAT
+  ''TODO
 
+  DST_REPLY     = -1
+  DST_BROADCAST = -2
+  DST_MANUAL    = -3
+
+DAT
               alignl
 
 ' host 0: self
