@@ -214,6 +214,30 @@ PUB bswap2(w) : result
 PUB bswap4(l) : result
   return l.byte[0] << 24 | l.byte[1] << 16 | l.byte[2] << 8 | l.byte[3]
 
+CON '' Internet checksum - RFC 1071
+PUB ip_csum(ptr, rx_len) : csum
+
+  return ip_csum_final(ip_csum_acc(ptr, rx_len))
+
+PUB ip_csum_acc(ptr, rx_len) : csum | i
+
+  csum~
+  repeat i from 0 to rx_len-1
+    if i & 1
+      csum += byte[ptr++]
+    else
+      csum += byte[ptr++] << 8
+
+PUB ip_csum_final(csum) : out
+
+  ' fold carries
+  csum := csum.word[0] + csum.word[1]
+  ' fold final carry
+  csum := csum.word[0] + csum.word[1]
+
+  ' complement, swap bytes, and mask
+  return bswap2(!csum)
+
 CON '' Copyright
 {{
 
