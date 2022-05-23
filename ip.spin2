@@ -153,27 +153,185 @@ PRI finalize_tx_arp(ptr, tx_len, dst)
 
 CON '' IPv4 - RFC 791
   ETHERTYPE_IPv4 = $0800
-PUB on_rx_ipv4(eth_hdr, ptr, rx_len) : tx_len, dst
+PUB on_rx_ipv4(eth_hdr, ptr, rx_len) : tx_len, dst | csum, total_len, proto, hlen, cb
 
-  debug("rx IPv4 ", uhex_word(rx_len), ": NYI")
-  abort 0
+  ifnot rx_len
+    abort 0
 
-PRI finalize_tx_ipv4(ptr, tx_len)
+  if byte[ptr].[7..4] <> 4
+    debug("wrong version: ", uhex_(byte[ptr].[7..4]), " <> 4!")
+    abort 0
 
-  debug("tx IPv4 ", uhex_word(tx_len), ": NYI")
-  abort 0
+  hlen := byte[ptr].[3..0] << 2
+
+  if hlen < 20
+    debug(udec(hlen), " < 20!")
+    abort 0
+
+  if rx_len < hlen
+    debug(uhex(rx_len), " < ", uhex(hlen), "; too short")
+    abort 0
+
+  ' Only accept packets relevant to us
+  ifnot long[ptr][4] == ownIPv4.long { own IP
+   } or long[ptr][4] == -1 { broadcast
+   }' or TODO { subnet broadcast }
+    abort 0
+
+
+  '' TODO: Process options if hlen > 20
+
+  ' We don't support fragmentation.  The entire fragmentation word except DF must be zero.
+  if word[ptr][3] & %11111111_101_11111
+    debug("rx IPv4 ", uhex_word(rx_len), ": fragmentation unsupported: ", ubin_word_(bswap2(word[ptr][3])))
+    abort 0
+
+  ' Verify checksum
+  if csum := ip_csum(ptr, hlen)
+    debug("rx IPv4 ", uhex_word(rx_len), ": bad ", uhex_word(csum))
+    abort 0
+
+  total_len := bswap2(word[ptr][1])
+  if total_len > rx_len
+    ' Too long
+    debug("rx IPv4 ", uhex_word(total_len), " > ", uhex_word(rx_len))
+    abort 0
+
+  ' Dispatch to handler
+  cb := dispatch_ip_payload(proto := byte[ptr][9])
+  tx_len, dst := cb(ptr, ptr + hlen, total_len - hlen):2
+  tx_len += hlen
+
+PUB setup_tx_ipv4(ptr, hlen, proto) : payload_ptr | ip_hdr
+
+  ip_hdr := setup_tx_eth(ptr, ETHERTYPE_IPv4)
+
+  ' Version/IHL
+  if hlen < 20 or hlen & 3 or hlen > 60
+    debug("tx ipv4: invalid ", udec(hlen))
+    abort 0
+
+  byte[ip_hdr] := $40 | ((hlen >> 2) & $F)
+
+  byte[ip_hdr][1]~                       ' DSCP/ECN
+  word[ip_hdr][2]~                       ' Identification
+  word[ip_hdr][3] := %00000000_010_00000 ' Don't Fragment
+  byte[ip_hdr][8] := 255                 ' TTL
+  byte[ip_hdr][9] := proto
+
+  payload_ptr := ip_hdr + hlen
+
+PRI finalize_tx_ipv4(ptr, tx_len, dst) | hlen, proto, cb
+
+  if dst => 0
+    ' Get dst address from hosts table
+    debug("NYI: dst IPv4 from hosts table")
+    abort 0
+  elseif dst == DST_REPLY
+    ' Fill dst address with old src
+    bytemove(ptr+16, ptr+12, 4)
+  elseif dst == DST_BROADCAST
+    '' TODO
+    abort 0
+  elseifnot dst == DST_MANUAL
+    abort 0
+
+  ' Fill src address with our own
+  bytemove(ptr+12, @ownIPv4, 4)
+
+  hlen := byte[ptr].[3..0] << 2
+
+  ' Finish next header
+  case proto := byte[ptr][9]
+    other:
+      debug("rx IPv4: unknown ", uhex_byte(proto))
+      abort 0
+
+  cb(ptr, ptr + hlen, tx_len - hlen, dst)
+
+  ' Set length
+  word[ptr][1] := bswap2(tx_len)
+
+  ' Update header checksum
+  word[ptr][5]~
+  word[ptr][5] := ip_csum(ptr, hlen)
 
 CON '' IPv6 - RFC 8200
   ETHERTYPE_IPv6 = $86DD
-PUB on_rx_ipv6(eth_hdr, ptr, rx_len) : tx_len, dst
+PUB on_rx_ipv6(eth_hdr, ptr, rx_len) : tx_len, dst | payload_len, proto, handler
 
-  debug("rx IPv6 ", uhex_word(rx_len), ": NYI")
-  abort 0
+  ifnot rx_len
+    abort 0
 
-PRI finalize_tx_ipv6(ptr, tx_len)
+  if byte[ptr].[7..4] <> 6
+    debug("wrong version: ", uhex_(byte[ptr].[7..4]), " <> 6!")
+    abort 0
 
-  debug("tx IPv6 ", uhex_word(tx_len), ": NYI")
-  abort 0
+  if rx_len < 40
+    debug("rx IPv6 ", uhex_word(rx_len), " < 40; too short")
+    abort 0
+
+  '' TODO: Only accept packets addressed to our address, broadcast, or relevant multicast addresses (e.g. mDNS)
+
+  '' TODO: Traffic class, flow label, etc.
+
+  payload_len := bswap2(word[ptr][2])
+  if payload_len+40 > rx_len
+    ' Too long
+    debug("rx IPv6 ", uhex_word(payload_len+40), " > ", uhex_word(rx_len))
+    abort 0
+
+  ' Dispatch to handler
+  handler := dispatch_ip_payload(proto := byte[ptr][6])
+  tx_len, dst := handler(ptr, ptr + 40, payload_len):2
+  tx_len += 40
+
+PUB setup_tx_ipv6(ptr, proto) : payload_ptr | ip_hdr
+
+  ip_hdr := setup_tx_eth(ptr, ETHERTYPE_IPv6)
+  long[ip_hdr] := $000000_60 ' Version, Traffic class, Flow label
+  '' TODO: Clear unused fields
+  byte[ip_hdr][6] := proto
+
+  payload_ptr := ip_hdr + 40
+
+PRI finalize_tx_ipv6(ptr, tx_len, dst) | proto, cb
+
+  if dst => 0
+    '' TODO: Get dst from hosts table
+    debug("NYI: dst IPv6 from hosts table")
+    abort 0
+  elseif dst == DST_REPLY
+    ' Fill dst address with old src
+    bytemove(ptr+24, ptr+8, 16)
+  elseif dst == DST_BROADCAST
+    '' TODO
+    abort 0
+  elseifnot dst == DST_MANUAL
+    abort 0
+
+  ' Fill src address with our own
+  bytemove(ptr+8, @ownIPv6, 16)
+
+  ' Finish next header
+  case proto := byte[ptr][6]
+    '' TODO
+    other:
+      debug("rx IPv6: unknown ", uhex_byte(proto))
+      abort 0
+
+  cb(ptr, ptr + 40, tx_len - 40, dst)
+
+  ' Set length
+  word[ptr][2] := bswap2(tx_len - 40)
+
+PUB dispatch_ip_payload(proto) : cb
+
+  case proto
+    '' TODO
+    other:
+      debug("rx IP: unknown ", uhex_byte(proto))
+      abort 0
 
 CON '' ICMPv4 - RFC 1624
 CON '' TCP - RFC 793
@@ -194,6 +352,7 @@ DAT
 ' host 0: self
 ownIPv4       byte 0, 0, 0, 0
 ownMAC        byte $00, $00, $00, $00, $00, $00
+ownIPv6       byte 0[16]
 
 PUB link_reset
 

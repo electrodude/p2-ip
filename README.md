@@ -6,6 +6,7 @@ Tested with ManAtWork's included MAC/PHY driver for the LAN8720A.  It should be 
 
 - Parses Ethernet frames and dispatches them by EtherType
 - Replies to ARP requests
+- Receives IPv4 and IPv6 packets but doesn't yet know what to do with them
 
 ## Planned Work
 
