@@ -15,6 +15,7 @@ OBJ
 
   phy : "EthPhy_RMII.spin2"
   ip  : "ip.spin2"
+  fmt : "ip_fmt.spin2"
 
 DAT '' Static config
 
@@ -34,6 +35,7 @@ PUB main
   ip.init()
   ip.set_mac(0, @mac)
   ip.set_ipv4(0, @ipv4)
+  ip.set_on_udp(@on_udp)
 
   link_status~
   repeat
@@ -78,6 +80,33 @@ PRI handle_pkt(ptr) | len
 
   ' Submit packet
   phy.EthSend(ptr)
+
+CON '' UDP server
+PRI udp_echo() | c
+
+  repeat while (c := recv()) => 0
+    if 32 =< c and c < 127
+      c ^= 2
+    send(c)
+
+PRI on_udp(udp_hdr, ptr, rx_len) : tx_len, dst | str, dport, sport
+
+  send := fmt.pkt_send_setup(ptr, 1500)
+  recv := fmt.pkt_recv_setup(ptr, rx_len)
+
+  ' Get destination and source ports, which were already swapped
+  dport := ip.bswap2(word[udp_hdr][0])
+  sport := ip.bswap2(word[udp_hdr][1])
+
+  if dport == 12345
+    udp_echo
+  elseif dport == 12347
+    send("Got ", fmt.dec(rx_len), " bytes from port ", fmt.dec(sport), 10)
+  else
+    return ip.on_udp_builtin(udp_hdr, ptr, rx_len)
+
+  tx_len := fmt.pkt_send_finish
+  dst := -1
 
 CON '' Copyright
 {{

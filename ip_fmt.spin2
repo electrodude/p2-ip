@@ -1,0 +1,155 @@
+{{
+Propeller 2 Internet Protocol implementation - formatting routines
+Copyright © 2022 Albert Emanuel Milani
+See end of file for terms of use (MIT).
+}}
+
+CON '' send/recv into a buffer
+VAR
+  long pkt_send_base
+  long pkt_send_i
+  long pkt_send_anchor
+  long pkt_send_max
+  long pkt_recv_base
+  long pkt_recv_i
+  long pkt_recv_max
+
+PUB pkt_send_setup(ptr, tx_len)
+  pkt_send_base := ptr
+  pkt_send_i~
+  pkt_send_anchor~
+  pkt_send_max := tx_len
+  return @pkt_send
+
+PUB pkt_send_finish() : tx_len
+  return pkt_send_i
+
+PUB pkt_send_end() : ptr
+  return @byte[pkt_send_base][pkt_send_i]
+
+PUB pkt_send(c)
+
+  if pkt_send_i => pkt_send_max
+    return
+
+  if c == $100
+    pkt_send_anchor := pkt_send_i
+  elseif c > $100
+    repeat while pkt_send_i - pkt_send_anchor < c - $100
+      byte[pkt_send_base][pkt_send_i++] := " "
+  else
+    byte[pkt_send_base][pkt_send_i++] := c
+
+PUB pkt_recv_setup(ptr, rx_len)
+  pkt_recv_base := ptr
+  pkt_recv_i~
+  pkt_recv_max := rx_len
+  return @pkt_recv
+
+PUB pkt_recv_finish() : rx_len
+  return pkt_recv_i
+
+PUB pkt_recv_end() : ptr
+  return @byte[pkt_recv_base][pkt_recv_i]
+
+PUB pkt_recv : c
+
+  if pkt_recv_i => pkt_recv_max
+    return -1
+
+  return byte[pkt_recv_base][pkt_recv_i++]
+
+CON '' IP-specific formatting routines
+PUB ipv4(p)
+  send(dec(byte[p][0]), ".", dec(byte[p][1]), ".", dec(byte[p][2]), ".", dec(byte[p][3]))
+
+PUB ipv6(p) | i, w, run_start, run_len, best_len, best_start ' RFC 4291 and RFC 5952
+
+  '' According to RFC 5952 §4, we should shorten (::) the first
+  '' longest sequence of at least two zero words.
+
+  ' Find the longest sequence
+  run_start~~
+  run_len~
+  best_start~
+  best_len~
+  repeat i from 0 to 8
+    if i < 8 and not word[p][i]
+      if run_start < 0
+        run_start := i
+    elseifnot run_start < 0
+      ' [run_start, i) is a run of zeros
+      run_len := i - run_start
+      if run_len => 2 and run_len > best_len
+        best_start, best_len := run_start, run_len
+      run_start~~
+
+  ' Print the address, substituting the first longest zero sequence with ::
+  repeat i from 0 to 7
+    ifnot i < best_start or i => best_start + best_len
+      if i == best_start
+        send(":")
+      if i == 7
+        send(":")
+      next
+    if i
+      send(":")
+    w := word[p][i]
+    w := w.byte[0] << 8 | w.byte[1]
+    if w => $1000
+      send(hexchr.byte[w.[15..12]])
+    if w => $100
+      send(hexchr.byte[w.[11..8]])
+    if w => $10
+      send(hexchr.byte[w.[7..4]])
+    send(hexchr.byte[w.[3..0]])
+
+PUB mac(p)
+  send(hex2(byte[p][0]), ":", hex2(byte[p][1]), ":", hex2(byte[p][2]), ":", hex2(byte[p][3]), ":", hex2(byte[p][4]), ":", hex2(byte[p][5]))
+
+CON '' Low-level formatting routines
+PUB hex2(x)
+  send(hexchr.byte[x.[7..4]])
+  send(hexchr.byte[x.[3..0]])
+
+PUB dec(x)
+  if x < 0
+    send("-")
+    -x
+
+  udec(x)
+
+PUB udec(x) | q
+  if x => 10
+    q, x := x/10, x//10
+    udec(q)
+
+  send(x + "0")
+
+DAT
+hexchr byte "0123456789abcdef"
+
+CON '' Copyright
+{{
+
+  Terms of Use: MIT License
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+}}
