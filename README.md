@@ -7,6 +7,7 @@ Tested with ManAtWork's included MAC/PHY driver for the LAN8720A.  It should be 
 - Replies to ARP requests
 - Replies to ICMP pings
 - Sends replies to UDP packets provided by a user-supplied callback
+- Actively refuses all TCP connections
 
 ## Planned Work
 

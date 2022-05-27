@@ -259,6 +259,7 @@ PRI finalize_tx_ipv4(ptr, tx_len, dst) | hlen, proto, cb
   ' Finish next header
   case proto := byte[ptr][9]
     PROTO_ICMPv4 : cb := @finalize_tx_icmp
+    PROTO_TCP    : cb := @finalize_tx_tcp
     PROTO_UDP    : cb := @finalize_tx_udp
     other:
       debug("rx IPv4: unknown ", uhex_byte(proto))
@@ -333,8 +334,8 @@ PRI finalize_tx_ipv6(ptr, tx_len, dst) | proto, cb
   ' Finish next header
   case proto := byte[ptr][6]
     PROTO_ICMPv6 : cb := @finalize_tx_icmp
+    PROTO_TCP    : cb := @finalize_tx_tcp
     PROTO_UDP    : cb := @finalize_tx_udp
-    '' TODO
     other:
       debug("rx IPv6: unknown ", uhex_byte(proto))
       abort 0
@@ -348,9 +349,9 @@ PUB dispatch_ip_payload(proto) : cb
 
   case proto
     PROTO_ICMPv4: cb := @on_rx_icmpv4
+    PROTO_TCP   : cb := @on_rx_tcp
     PROTO_UDP   : cb := @on_rx_udp
     PROTO_ICMPv6: cb := @on_rx_icmpv6
-    '' TODO
     other:
       debug("rx IP: unknown ", uhex_byte(proto))
       abort 0
@@ -423,6 +424,54 @@ PRI icmp_csum(ip_hdr, ptr, len) : csum
   csum := ip_csum_final(csum + ip_csum_acc(ptr, len))
 
 CON '' TCP - RFC 793
+  PROTO_TCP = 6
+PUB on_rx_tcp(ip_hdr, ptr, rx_len) : tx_len, dst | sport, dport, csum, hlen
+
+  if rx_len < 20
+    debug("rx TCP ", uhex_word(rx_len), " < 20; too short")
+    abort 0
+
+  ' Verify checksum
+  if csum := ip_csum_final(pseudo_csum(ip_hdr) + PROTO_TCP + rx_len + ip_csum_acc(ptr, rx_len))
+    debug("rx TCP ", uhex_word(rx_len), ": bad ", uhex_word(csum))
+    abort 0
+
+  hlen := byte[ptr][13].[7..4] << 2
+
+  ' Swap source and destination ports
+  sport := word[ptr][0]
+  dport := word[ptr][1]
+  word[ptr][0] := dport
+  word[ptr][1] := sport
+
+  debug("rx TCP ", uhex_word(rx_len), ": ", udec_(bswap2(sport)), " => ", udec_(bswap2(dport)), ": NYI")
+
+  '' Always return RST, refusing all connections!
+  hlen := 20 ' no options
+  ' Set sequence and acknowledgement number to one more than the received sequence number
+  long[ptr][1] := long[ptr][2] := bswap4(bswap4(long[ptr][1]) + 1)
+  byte[ptr][12].[7..4] := hlen >> 2
+  byte[ptr][13] := %10100 ' ACK, RST
+  tx_len, dst := hlen, DST_REPLY
+
+  '' TODO: Actually handle packet at (ptr + hlen, rx_len - hlen)
+  '' TODO: Should we just call a callback like for UDP and let that worry about it?
+
+{{
+I think it might make sense to only worry about congestion control, and let the
+application worry about buffers.
+}}
+
+PRI finalize_tx_tcp(ip_hdr, ptr, tx_len, dst) | hlen
+
+  hlen := byte[ptr].[7..4] << 2
+
+  '' TODO
+
+  ' Update checksum
+  word[ptr][8]~
+  word[ptr][8] := ip_csum_final(pseudo_csum(ip_hdr) + PROTO_TCP + tx_len + ip_csum_acc(ptr, tx_len))
+
 CON '' UDP - RFC 768
   PROTO_UDP = 17
 PUB on_rx_udp(ip_hdr, ptr, rx_len) : tx_len, dst | sport, dport, csum, udp_len
