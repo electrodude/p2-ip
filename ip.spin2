@@ -243,6 +243,7 @@ PRI finalize_tx_ipv4(ptr, tx_len, dst) | hlen, proto, cb
 
   ' Finish next header
   case proto := byte[ptr][9]
+    PROTO_ICMPv4 : cb := @finalize_tx_icmp
     other:
       debug("rx IPv4: unknown ", uhex_byte(proto))
       abort 0
@@ -315,6 +316,7 @@ PRI finalize_tx_ipv6(ptr, tx_len, dst) | proto, cb
 
   ' Finish next header
   case proto := byte[ptr][6]
+    PROTO_ICMPv6 : cb := @finalize_tx_icmp
     '' TODO
     other:
       debug("rx IPv6: unknown ", uhex_byte(proto))
@@ -328,12 +330,80 @@ PRI finalize_tx_ipv6(ptr, tx_len, dst) | proto, cb
 PUB dispatch_ip_payload(proto) : cb
 
   case proto
+    PROTO_ICMPv4: cb := @on_rx_icmpv4
+    PROTO_ICMPv6: cb := @on_rx_icmpv6
     '' TODO
     other:
       debug("rx IP: unknown ", uhex_byte(proto))
       abort 0
 
-CON '' ICMPv4 - RFC 1624
+CON '' ICMPv4 and ICMPv6 - RFC 1624 and RFC 4443
+  PROTO_ICMPv4 = 1
+  PROTO_ICMPv6 = 58
+PUB on_rx_icmpv4(ip_hdr, ptr, rx_len) : tx_len, dst | type, code
+
+  ' Verify
+  verify_icmp(ip_hdr, ptr, rx_len)
+
+  type, code := byte[ptr][0], byte[ptr][1]
+  case type
+    8:
+      byte[ptr][0] := 0
+      byte[ptr][1] := 0
+      debug("rx ping ", uhex_word(rx_len))
+    '' TODO: Support more types of messages
+    other:
+      debug("rx ICMPv4 ", uhex_word(rx_len), ": NYI ", uhex_byte(type), uhex_byte(code))
+      abort 0
+
+  tx_len, dst := rx_len, DST_REPLY
+
+PUB on_rx_icmpv6(ip_hdr, ptr, rx_len) : tx_len, dst | type, code
+
+  ' Verify
+  verify_icmp(ip_hdr, ptr, rx_len)
+
+  type, code := byte[ptr][0], byte[ptr][1]
+  case type
+    128: ' Echo Request
+      if code
+        abort 0
+      byte[ptr][0] := 129
+      byte[ptr][1] := 0
+    '' TODO: Support more types of messages
+    other:
+      debug("rx ICMPv6 ", uhex_word(rx_len), ": NYI ", uhex_byte(type), uhex_byte(code))
+      abort 0
+
+  abort 0
+
+
+PRI finalize_tx_icmp(ip_hdr, ptr, tx_len, dst)
+
+  ' Update checksum
+  word[ptr][1]~
+  word[ptr][1] := icmp_csum(ip_hdr, ptr, tx_len)
+
+PRI verify_icmp(ip_hdr, ptr, rx_len) | csum
+
+  if rx_len < 8
+    debug("rx ICMP ", uhex_word(rx_len), " < 8; too short")
+    abort 0
+
+  ' Verify checksum
+  if csum := icmp_csum(ip_hdr, ptr, rx_len)
+    debug("rx ICMP ", uhex_word(rx_len), ": bad ", uhex_word(csum))
+    abort 0
+
+PRI icmp_csum(ip_hdr, ptr, len) : csum
+
+  case byte[ip_hdr].[7..4]
+    4: csum~
+    6: csum := pseudo_csum(ip_hdr) + PROTO_ICMPv6 + len
+    other: abort 0
+
+  csum := ip_csum_final(csum + ip_csum_acc(ptr, len))
+
 CON '' TCP - RFC 793
 CON '' UDP - RFC 768
 CON '' DHCP - RFC TODO
