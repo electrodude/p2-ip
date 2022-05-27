@@ -7,6 +7,7 @@ Tested with ManAtWork's included MAC/PHY driver for the LAN8720A.  It should be 
 - Parses Ethernet frames and dispatches them by EtherType
 - Replies to ARP requests
 - Receives IPv4 and IPv6 packets but doesn't yet know what to do with them
+- Replies to ICMP pings
 
 ## Planned Work
 
@@ -19,8 +20,9 @@ Tested with ManAtWork's included MAC/PHY driver for the LAN8720A.  It should be 
 	- Send ARP probes for nodes we're trying to contact
 - IPv4
 - IPv6
-- ICMPv4
-- ICMPv6
+- ICMPv4 features besides ping
+- ICMPv6 features besides ping
+	- Most importantly, NDP
 - Hosts table
 	- Associates IP addresses, MAC addresses, and hostnames
 - UDP
