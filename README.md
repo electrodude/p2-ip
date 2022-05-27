@@ -4,10 +4,9 @@ Tested with ManAtWork's included MAC/PHY driver for the LAN8720A.  It should be 
 
 ## Current Functionality
 
-- Parses Ethernet frames and dispatches them by EtherType
 - Replies to ARP requests
-- Receives IPv4 and IPv6 packets but doesn't yet know what to do with them
 - Replies to ICMP pings
+- Sends replies to UDP packets provided by a user-supplied callback
 
 ## Planned Work
 
@@ -25,7 +24,6 @@ Tested with ManAtWork's included MAC/PHY driver for the LAN8720A.  It should be 
 	- Most importantly, NDP
 - Hosts table
 	- Associates IP addresses, MAC addresses, and hostnames
-- UDP
 - DHCP client
 - DNS resolver
 - mDNS

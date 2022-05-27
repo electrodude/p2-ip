@@ -4,10 +4,25 @@ Copyright © 2022 Albert Emanuel Milani
 See end of file for terms of use (MIT).
 }}
 
+VAR
+  long on_udp '' UDP callback (udp_hdr, ptr, rx_len) : tx_len, dst
+              '' Should call on_udp_builtin and return whatever that returns if it doesn't want the packet.
+
 CON '' Initialization
 PUB init
 
   link_reset
+
+  set_on_udp(@on_udp_builtin)
+
+PUB set_on_udp(new) : old
+
+  old := on_udp
+  on_udp := new ? new : @drop_pkt
+
+PRI drop_pkt(udp_hdr, ptr, rx_len) : tx_len, dst
+
+  abort 0
 
 CON '' Ethernet framing
 '' Assumes the caller deals with the CRC and doesn't include it in lengths.
@@ -244,6 +259,7 @@ PRI finalize_tx_ipv4(ptr, tx_len, dst) | hlen, proto, cb
   ' Finish next header
   case proto := byte[ptr][9]
     PROTO_ICMPv4 : cb := @finalize_tx_icmp
+    PROTO_UDP    : cb := @finalize_tx_udp
     other:
       debug("rx IPv4: unknown ", uhex_byte(proto))
       abort 0
@@ -317,6 +333,7 @@ PRI finalize_tx_ipv6(ptr, tx_len, dst) | proto, cb
   ' Finish next header
   case proto := byte[ptr][6]
     PROTO_ICMPv6 : cb := @finalize_tx_icmp
+    PROTO_UDP    : cb := @finalize_tx_udp
     '' TODO
     other:
       debug("rx IPv6: unknown ", uhex_byte(proto))
@@ -331,6 +348,7 @@ PUB dispatch_ip_payload(proto) : cb
 
   case proto
     PROTO_ICMPv4: cb := @on_rx_icmpv4
+    PROTO_UDP   : cb := @on_rx_udp
     PROTO_ICMPv6: cb := @on_rx_icmpv6
     '' TODO
     other:
@@ -406,6 +424,69 @@ PRI icmp_csum(ip_hdr, ptr, len) : csum
 
 CON '' TCP - RFC 793
 CON '' UDP - RFC 768
+  PROTO_UDP = 17
+PUB on_rx_udp(ip_hdr, ptr, rx_len) : tx_len, dst | sport, dport, csum, udp_len
+
+  if rx_len < 8
+    debug("rx UDP ", uhex_word(rx_len), " < 8; too short")
+    abort 0
+
+  ' Extra logic to implement the transport layer portion of UDP-Lite (RFC 3828).
+  '' TODO: Test UDP-Lite
+  udp_len := bswap2(word[ptr][2])
+  ifnot udp_len
+    udp_len := rx_len
+  elseif udp_len < 8
+    ' Too short
+    debug("rx UDP ", uhex_word(udp_len), " too short")
+    abort 0
+  elseif udp_len > rx_len
+    ' Too long
+    debug("rx UDP ", uhex_word(udp_len), " > ", uhex_word(rx_len))
+    abort 0
+
+  ' Verify checksum
+  ifnot word[ptr][3]
+    debug("rx UDP ", uhex_word(rx_len), ": zero csum")
+  elseif csum := ip_csum_final(pseudo_csum(ip_hdr) + PROTO_UDP + rx_len + ip_csum_acc(ptr, udp_len))
+    debug("rx UDP ", uhex_word(rx_len, udp_len), ": bad ", uhex_word(csum))
+    abort 0
+
+  ' Swap source and destination ports
+  sport, dport := word[ptr][0],  word[ptr][1]
+  word[ptr][0], word[ptr][1] := dport, sport
+
+  ' Dispatch to application
+  tx_len, dst := on_udp(ptr, ptr+8, rx_len-8):2
+  tx_len += 8
+
+PUB setup_tx_udp4(ptr, sport, dport) : payload_ptr | udp_hdr
+
+  udp_hdr := setup_tx_ipv4(ptr, 20, PROTO_UDP)
+
+  word[udp_hdr][0] := bswap2(dport)
+  word[udp_hdr][1] := bswap2(sport)
+
+  payload_ptr := udp_hdr + 8
+
+PRI finalize_tx_udp(ip_hdr, ptr, tx_len, dst)
+
+  ' Set UDP length
+  word[ptr][2] := bswap2(tx_len)
+
+  ' Update checksum
+  word[ptr][3]~
+  word[ptr][3] := ip_csum_final(pseudo_csum(ip_hdr) + PROTO_UDP + tx_len + ip_csum_acc(ptr, tx_len))
+
+PUB on_udp_builtin(udp_hdr, ptr, rx_len) : tx_len, dst | dport, sport
+
+  ' Get destination and source ports, which were already swapped
+  dport := bswap2(word[udp_hdr][0])
+  sport := bswap2(word[udp_hdr][1])
+
+  debug("rx UDP ", uhex_word(rx_len), ": ", udec_(sport), " => ", udec_(dport), ": unhandled")
+  abort 0
+
 CON '' DHCP - RFC TODO
 CON '' mDNS - RFC TODO
 CON '' DNS - RFC TODO
@@ -466,6 +547,16 @@ PUB ip_csum_final(csum) : out
 
   ' complement, swap bytes, and mask
   return bswap2(!csum)
+
+PRI pseudo_csum(ip_hdr) : csum
+  '' Compute the address part of the IP header pseudo-checksum used by TCP and UDP
+
+  case byte[ip_hdr].[7..4]
+    4: csum := ip_csum_acc(ip_hdr+12,  8)
+    6: csum := ip_csum_acc(ip_hdr+ 8, 32)
+    other:
+      debug("pseudo_csum: unknown version ", udec_(byte[ip_hdr].[7..4]))
+      abort 0
 
 CON '' Copyright
 {{
